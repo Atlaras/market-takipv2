@@ -1,0 +1,6 @@
+{
+  "name": "ŞOK Kişisel Takip",
+  "description": "ŞOK Market kişisel QR, kasa vardiyası, SKT parti yönetimi ve finansal rapor takip uygulaması.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

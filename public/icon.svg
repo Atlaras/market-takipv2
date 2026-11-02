@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#002b70"/>
+      <stop offset="100%" stop-color="#001a44"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="110" fill="url(#bgGrad)"/>
+  
+  <!-- Outer Glow / Starburst in Yellow & Red -->
+  <g transform="translate(256, 256)" filter="url(#shadow)">
+    <!-- Yellow starburst badge -->
+    <path d="M 0 -170 L 40 -90 L 125 -140 L 105 -50 L 190 -40 L 130 30 L 180 100 L 95 105 L 110 190 L 30 140 L -20 195 L -60 120 L -140 160 L -115 80 L -195 50 L -130 -15 L -180 -85 L -95 -85 L -80 -170 L 0 -115 Z" fill="#FFE000" stroke="#E60000" stroke-width="14" stroke-linejoin="round"/>
+    
+    <!-- Central White pill for high contrast readability -->
+    <ellipse cx="0" cy="5" rx="140" ry="85" fill="#FFFFFF" stroke="#FFE000" stroke-width="6"/>
+    
+    <!-- ŞOK Text in Navy/Blue with red diacritic -->
+    <!-- Letter Ş -->
+    <text x="-95" y="42" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-weight="900" font-size="105" fill="#00358E" letter-spacing="-2">Ş</text>
+    <circle cx="-62" cy="74" r="8" fill="#E60000"/>
+    
+    <!-- Letter O -->
+    <text x="-32" y="42" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-weight="900" font-size="105" fill="#00358E" letter-spacing="-2">O</text>
+    
+    <!-- Letter K -->
+    <text x="38" y="42" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-weight="900" font-size="105" fill="#00358E" letter-spacing="-2">K</text>
+    
+    <!-- Star sparkle in Red -->
+    <path d="M -15 -45 Q -10 -58 0 -60 Q -10 -62 -15 -75 Q -20 -62 -30 -60 Q -20 -58 -15 -45 Z" fill="#E60000"/>
+  </g>
+</svg>
