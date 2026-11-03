@@ -25,8 +25,11 @@ export function isAllowedEmail(email?: string | null): boolean {
 }
 
 // Doğrudan ve zorunlu Supabase bağlantı yapılandırması
-export const SUPABASE_URL = 'https://aubaqfanjbnysfeawqjd.supabase.co';
+export const SUPABASE_URL =
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_URL) ||
+  'https://aubaqfanjbnysfeawqjd.supabase.co';
 export const SUPABASE_ANON_KEY =
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_ANON_KEY) ||
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF1YmFxZmFuamJueXNmZWF3cWpkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM2MTI5MjcsImV4cCI6MjEwOTE4ODkyN30.2R7oDPjd6C7yipXEqTVb7MWeq6M60DnYj0InZIoBo7I';
 
 export const supabase: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
