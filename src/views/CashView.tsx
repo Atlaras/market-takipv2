@@ -14,17 +14,14 @@ import {
   Split,
   Coins,
   X,
-  Lock,
-  Unlock,
-  AlertTriangle,
-  FileText,
+  RefreshCw,
 } from 'lucide-react';
 import {
   CashShift,
   CashTransaction,
-  CashTransactionType,
   UserProfile,
   CashCount,
+  DenominationCounts,
 } from '../types';
 import {
   calculateShiftTotals,
@@ -39,12 +36,12 @@ import {
   getTodayDateString,
 } from '../utils/dateValidation';
 import {
-  createShift,
-  closeShift,
   addCashTransaction,
   updateCashTransaction,
   deleteCashTransaction,
   saveCashCount,
+  getLatestCashCount,
+  ensureDailyShift,
 } from '../lib/supabase';
 
 interface CashViewProps {
@@ -61,20 +58,37 @@ type QuickActionTab =
   | 'split_payment'
   | 'cash_refund'
   | 'other_in'
-  | 'other_out'
-  | 'cash_count';
+  | 'other_out';
+
+interface DenominationItem {
+  value: number;
+  key: keyof DenominationCounts;
+  label: string;
+  type: 'banknote' | 'coin';
+  badgeBg: string;
+  badgeText: string;
+}
+
+const DENOMINATIONS: DenominationItem[] = [
+  { value: 200, key: 'd200', label: '200 TL', type: 'banknote', badgeBg: 'bg-emerald-100', badgeText: 'text-emerald-800' },
+  { value: 100, key: 'd100', label: '100 TL', type: 'banknote', badgeBg: 'bg-blue-100', badgeText: 'text-blue-800' },
+  { value: 50,  key: 'd50',  label: '50 TL',  type: 'banknote', badgeBg: 'bg-amber-100', badgeText: 'text-amber-800' },
+  { value: 20,  key: 'd20',  label: '20 TL',  type: 'banknote', badgeBg: 'bg-teal-100', badgeText: 'text-teal-800' },
+  { value: 10,  key: 'd10',  label: '10 TL',  type: 'banknote', badgeBg: 'bg-rose-100', badgeText: 'text-rose-800' },
+  { value: 5,   key: 'd5',   label: '5 TL',   type: 'banknote', badgeBg: 'bg-indigo-100', badgeText: 'text-indigo-800' },
+  { value: 1,   key: 'd1',   label: '1 TL',   type: 'coin',     badgeBg: 'bg-yellow-100', badgeText: 'text-yellow-800' },
+];
 
 export const CashView: React.FC<CashViewProps> = ({
   user,
   activeShift,
   shiftTransactions,
-  pastShifts,
   onShiftUpdated,
 }) => {
-  // Quick action active tab
+  // Quick action active tab for transaction entry
   const [activeTab, setActiveTab] = useState<QuickActionTab>('cash_sale');
 
-  // Input states for forms
+  // Input states for transaction forms
   // 1. Nakit Satış
   const [cashReceivedInput, setCashReceivedInput] = useState('');
   const [changeGivenInput, setChangeGivenInput] = useState('');
@@ -99,11 +113,6 @@ export const CashView: React.FC<CashViewProps> = ({
   const [otherOutAmountInput, setOtherOutAmountInput] = useState('');
   const [otherOutDescInput, setOtherOutDescInput] = useState('');
 
-  // 7. Fiilî Kasa Sayımı
-  const [actualCashInput, setActualCashInput] = useState('');
-  const [countNotesInput, setCountNotesInput] = useState('');
-  const [latestCount, setLatestCount] = useState<CashCount | null>(null);
-
   // General form feedback
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -111,28 +120,75 @@ export const CashView: React.FC<CashViewProps> = ({
   // Edit state for cash transaction
   const [editingTx, setEditingTx] = useState<CashTransaction | null>(null);
 
-  // Background auto-shift creation state if none exists
-  const [isAutoCreatingShift, setIsAutoCreatingShift] = useState(false);
+  // =========================================================================
+  // FİİLÎ SAYIM (Banknot ve Madeni Para Sayımı)
+  // =========================================================================
+  const [isCountModalOpen, setIsCountModalOpen] = useState(false);
+  const [denomCounts, setDenomCounts] = useState<DenominationCounts>({
+    d200: 0,
+    d100: 0,
+    d50: 0,
+    d20: 0,
+    d10: 0,
+    d5: 0,
+    d1: 0,
+  });
+  const [countNote, setCountNote] = useState('');
+  const [latestCount, setLatestCount] = useState<CashCount | null>(null);
+  const [isSavingCount, setIsSavingCount] = useState(false);
+  const [countSaveSuccess, setCountSaveSuccess] = useState(false);
 
-  // Ensure an active shift is readily available so the user is never blocked
-  const ensureShift = async (): Promise<string> => {
-    if (activeShift) return activeShift.id;
-    setIsAutoCreatingShift(true);
-    try {
-      const newShift = await createShift(
-        user.id,
-        'Günlük Vardiya',
-        getCurrentTimeString().slice(0, 5),
-        0,
-        false, // starting_cash_known: false -> "Bilinmiyor", no false 350 TL assumption!
-        'Otomatik Başlatılan Vardiya'
-      );
-      onShiftUpdated();
-      return newShift.id;
-    } finally {
-      setIsAutoCreatingShift(false);
+  // Calculate live shift totals
+  const totals = activeShift
+    ? calculateShiftTotals(
+        activeShift.starting_cash,
+        activeShift.starting_cash_known,
+        shiftTransactions
+      )
+    : calculateShiftTotals(0, true, shiftTransactions);
+
+  // Load latest physical count
+  useEffect(() => {
+    let isMounted = true;
+    async function loadLatest() {
+      try {
+        const count = await getLatestCashCount(activeShift?.id, user.id);
+        if (isMounted && count) {
+          setLatestCount(count);
+          if (count.count_breakdown) {
+            const b = count.count_breakdown as any;
+            setDenomCounts({
+              d200: Number(b.d200 ?? b['200']) || 0,
+              d100: Number(b.d100 ?? b['100']) || 0,
+              d50: Number(b.d50 ?? b['50']) || 0,
+              d20: Number(b.d20 ?? b['20']) || 0,
+              d10: Number(b.d10 ?? b['10']) || 0,
+              d5: Number(b.d5 ?? b['5']) || 0,
+              d1: Number(b.d1 ?? b['1']) || 0,
+            });
+          }
+        }
+      } catch {
+        // silent
+      }
     }
-  };
+    loadLatest();
+    return () => {
+      isMounted = false;
+    };
+  }, [activeShift, user.id]);
+
+  // Live calculation helpers for user feedback while typing
+  const liveNetCashSale = calculateNetCashSale(
+    parseFloat(cashReceivedInput.replace(',', '.')) || 0,
+    parseFloat(changeGivenInput.replace(',', '.')) || 0
+  );
+
+  const liveSplitCalc = calculateSplitPayment(
+    parseFloat(splitCashInput.replace(',', '.')) || 0,
+    parseFloat(splitCardInput.replace(',', '.')) || 0,
+    parseFloat(splitChangeInput.replace(',', '.')) || 0
+  );
 
   // Reset inputs
   const resetInputs = () => {
@@ -148,32 +204,9 @@ export const CashView: React.FC<CashViewProps> = ({
     setOtherInDescInput('');
     setOtherOutAmountInput('');
     setOtherOutDescInput('');
-    setActualCashInput('');
-    setCountNotesInput('');
     setEditingTx(null);
     setFormError(null);
   };
-
-  // Calculate live shift totals
-  const totals = activeShift
-    ? calculateShiftTotals(
-        activeShift.starting_cash,
-        activeShift.starting_cash_known,
-        shiftTransactions
-      )
-    : calculateShiftTotals(0, false, shiftTransactions);
-
-  // Live calculation helpers for user feedback while typing
-  const liveNetCashSale = calculateNetCashSale(
-    parseFloat(cashReceivedInput.replace(',', '.')) || 0,
-    parseFloat(changeGivenInput.replace(',', '.')) || 0
-  );
-
-  const liveSplitCalc = calculateSplitPayment(
-    parseFloat(splitCashInput.replace(',', '.')) || 0,
-    parseFloat(splitCardInput.replace(',', '.')) || 0,
-    parseFloat(splitChangeInput.replace(',', '.')) || 0
-  );
 
   // Handle saving new or updated transaction
   const handleSaveTransaction = async (e: React.FormEvent) => {
@@ -181,8 +214,8 @@ export const CashView: React.FC<CashViewProps> = ({
     setFormError(null);
 
     try {
-      const shiftId = await ensureShift();
       setIsSubmitting(true);
+      const shiftId = activeShift?.id || (await ensureDailyShift(user.id)).id;
 
       if (activeTab === 'cash_sale') {
         const received = parseFloat(cashReceivedInput.replace(',', '.'));
@@ -327,7 +360,7 @@ export const CashView: React.FC<CashViewProps> = ({
           return;
         }
 
-        const desc = otherInDescInput.trim() || 'Diğer Nakit Girişi';
+        const desc = otherInDescInput.trim() || 'Kasa Avans / Giriş';
 
         if (editingTx) {
           await updateCashTransaction({
@@ -359,7 +392,7 @@ export const CashView: React.FC<CashViewProps> = ({
           return;
         }
 
-        const desc = otherOutDescInput.trim() || 'Diğer Nakit Çıkışı';
+        const desc = otherOutDescInput.trim() || 'Gider / Masraf Çıkışı';
 
         if (editingTx) {
           await updateCashTransaction({
@@ -383,31 +416,6 @@ export const CashView: React.FC<CashViewProps> = ({
             description: desc,
           });
         }
-      } else if (activeTab === 'cash_count') {
-        const counted = parseFloat(actualCashInput.replace(',', '.'));
-        if (isNaN(counted) || counted < 0) {
-          setFormError('Lütfen sayılan gerçek nakit tutarını giriniz.');
-          setIsSubmitting(false);
-          return;
-        }
-
-        const evaluation = evaluateCashCount(
-          counted,
-          totals.expectedCash,
-          totals.startingCashKnown
-        );
-
-        const countResult = await saveCashCount({
-          shift_id: shiftId,
-          user_id: user.id,
-          actual_cash: counted,
-          expected_cash: totals.expectedCash,
-          difference: evaluation.difference,
-          status: evaluation.status,
-          notes: countNotesInput.trim() || undefined,
-        });
-
-        setLatestCount(countResult);
       }
 
       resetInputs();
@@ -468,26 +476,113 @@ export const CashView: React.FC<CashViewProps> = ({
     }
   };
 
-  // Close shift
-  const handleCloseShift = async () => {
-    if (!activeShift) return;
-    if (window.confirm('Vardiyayı kapatıp kasa devrini tamamlamak istediğinize emin misiniz?')) {
-      try {
-        await closeShift(activeShift.id, user.id);
-        onShiftUpdated();
-      } catch (err: any) {
-        alert(err.message || 'Vardiya kapatılamadı.');
-      }
+  // =========================================================================
+  // FİİLÎ SAYIM HESAPLAMA VE KAYIT
+  // =========================================================================
+  const updateDenomCount = (key: keyof DenominationCounts, delta: number) => {
+    setDenomCounts((prev) => {
+      const current = prev[key] || 0;
+      const nextVal = Math.max(0, current + delta);
+      return { ...prev, [key]: nextVal };
+    });
+  };
+
+  const setDenomDirect = (key: keyof DenominationCounts, rawVal: string) => {
+    const val = parseInt(rawVal) || 0;
+    setDenomCounts((prev) => ({
+      ...prev,
+      [key]: Math.max(0, val),
+    }));
+  };
+
+  // Total counted physical cash
+  const physicalCountTotal = DENOMINATIONS.reduce((sum, item) => {
+    const count = denomCounts[item.key] || 0;
+    return sum + item.value * count;
+  }, 0);
+
+  // Live difference between physical cash count and expected cash in drawer
+  const differenceAmount = physicalCountTotal - totals.expectedCash;
+  const isExact = Math.abs(differenceAmount) < 0.005;
+  const isSurplus = differenceAmount > 0.005;
+  const isDeficit = differenceAmount < -0.005;
+
+  const handleSavePhysicalCount = async () => {
+    setIsSavingCount(true);
+    setFormError(null);
+    try {
+      const shiftId = activeShift?.id || (await ensureDailyShift(user.id)).id;
+      const status = isExact ? 'exact' : isSurplus ? 'surplus' : 'deficit';
+
+      const saved = await saveCashCount({
+        shift_id: shiftId,
+        user_id: user.id,
+        actual_cash: physicalCountTotal,
+        expected_cash: totals.expectedCash,
+        difference: differenceAmount,
+        status,
+        notes: countNote.trim() || undefined,
+        count_breakdown: denomCounts,
+      });
+
+      setLatestCount(saved);
+      setCountSaveSuccess(true);
+      setTimeout(() => setCountSaveSuccess(false), 2500);
+      setIsCountModalOpen(false);
+      onShiftUpdated();
+    } catch (err: any) {
+      alert(err.message || 'Fiilî sayım kaydedilemedi.');
+    } finally {
+      setIsSavingCount(false);
+    }
+  };
+
+  const handleResetCounts = () => {
+    if (window.confirm('Tüm adetleri sıfırlamak istediğinize emin misiniz?')) {
+      setDenomCounts({
+        d200: 0,
+        d100: 0,
+        d50: 0,
+        d20: 0,
+        d10: 0,
+        d5: 0,
+        d1: 0,
+      });
+    }
+  };
+
+  // Diff styling helper for latest count
+  const renderLatestCountBadge = () => {
+    if (!latestCount) return null;
+    const diff = latestCount.actual_cash - totals.expectedCash;
+    if (diff > 0.005) {
+      return (
+        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+          Kasa Fazlası: +{formatCurrency(diff)}
+        </span>
+      );
+    } else if (diff < -0.005) {
+      return (
+        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/30">
+          Kasa Açığı: {formatCurrency(diff)}
+        </span>
+      );
+    } else {
+      return (
+        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+          Kasa Tam Denk (₺0,00)
+        </span>
+      );
     }
   };
 
   return (
     <div className="space-y-4 pb-28 px-4 max-w-lg mx-auto">
-      {/* Kasa Özeti Kartı */}
+      {/* Kasa Özeti Kartı (Günlük Kasa Durumu) */}
       <div className="bg-gradient-to-br from-[#002B70] via-[#00398A] to-[#0055D4] rounded-3xl p-5 text-white shadow-xl shadow-blue-950/20">
         <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-xl bg-white/10 flex items-center justify-center text-[#FFE000]">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center text-[#FFE000]">
               <Banknote className="w-5 h-5" />
             </div>
             <div>
@@ -500,188 +595,277 @@ export const CashView: React.FC<CashViewProps> = ({
             </div>
           </div>
 
-          {activeShift && (
-            <button
-              onClick={handleCloseShift}
-              className="text-[11px] font-bold bg-white/10 hover:bg-white/20 active:scale-95 text-white px-2.5 py-1.5 rounded-xl border border-white/20 transition-all flex items-center gap-1"
-            >
-              <Lock className="w-3.5 h-3.5" />
-              <span>Vardiya Kapat</span>
-            </button>
-          )}
+          <button
+            onClick={() => setIsCountModalOpen(true)}
+            className="text-[11px] font-black bg-[#FFE000] hover:bg-[#FFD000] active:scale-95 text-[#002B70] px-3 py-2 rounded-xl shadow-md transition-all flex items-center gap-1.5 shrink-0"
+          >
+            <Coins className="w-3.5 h-3.5" />
+            <span>Fiilî Sayım</span>
+          </button>
         </div>
 
         {/* Ciro ve Kasa Detayları Şeridi */}
         <div className="pt-3 border-t border-white/15 grid grid-cols-3 gap-2 text-xs">
           <div>
-            <span className="text-blue-200 text-[10px] block">Toplam Ciro</span>
+            <span className="text-blue-200 text-[10px] block">Günlük Ciro</span>
             <p className="font-bold text-white tabular-nums">
               {formatCurrency(totals.totalRevenue)}
             </p>
           </div>
           <div>
-            <span className="text-blue-200 text-[10px] block">Nakit Satışlar</span>
+            <span className="text-blue-200 text-[10px] block">Nakit Satış</span>
             <p className="font-bold text-emerald-300 tabular-nums">
               {formatCurrency(totals.totalCashSales)}
             </p>
           </div>
           <div>
-            <span className="text-blue-200 text-[10px] block">Kart Satışları</span>
+            <span className="text-blue-200 text-[10px] block">Kart Satış</span>
             <p className="font-bold text-purple-300 tabular-nums">
               {formatCurrency(totals.totalCardSales)}
             </p>
           </div>
         </div>
 
-        {/* Başlangıç Nakdi Durumu */}
-        <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between text-[11px] text-blue-200">
-          <span>Başlangıç Kasası:</span>
-          <span className="font-semibold text-white">
-            {totals.startingCashKnown
-              ? formatCurrency(totals.startingCash)
-              : 'Bilinmiyor (0 TL kabul edilmedi)'}
-          </span>
+        {/* Fiilî Sayım Durumu Bilgi Çubuğu */}
+        <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center justify-between text-xs">
+          <div className="flex items-center gap-1.5 text-blue-100">
+            <Coins className="w-3.5 h-3.5 text-amber-300" />
+            <span>
+              {latestCount
+                ? `Son Sayım: ${formatCurrency(latestCount.actual_cash)}`
+                : 'Bugün henüz sayım yapılmadı'}
+            </span>
+          </div>
+          <div>{renderLatestCountBadge()}</div>
         </div>
       </div>
 
-      {/* Üstte Yatay Hızlı İşlem Seçici Sekmeleri (Direct Quick Action Bar) */}
+      {/* ===================================================================== */}
+      {/* İŞLEM TÜRÜ SEÇİMİ — HIZLI VE SABİT 2x3 MATRİS (YATAY KAYDIRMA YOK)   */}
+      {/* ===================================================================== */}
       <div className="space-y-1.5">
-        <span className="text-xs font-bold text-slate-700 ml-1">İşlem Türü Seçin</span>
-        <div className="flex gap-1.5 overflow-x-auto pb-1 no-scrollbar">
+        <div className="flex items-center justify-between ml-1">
+          <span className="text-xs font-bold text-slate-700">İşlem Türü Seçin</span>
+          <span className="text-[10px] font-semibold text-slate-400">Tek Dokunuşla Seç</span>
+        </div>
+
+        <div className="grid grid-cols-3 gap-2">
+          {/* 1. Nakit Satış */}
           <button
             type="button"
             onClick={() => {
               setActiveTab('cash_sale');
               if (editingTx?.transaction_type !== 'cash_sale') setEditingTx(null);
             }}
-            className={`px-3 py-2 rounded-xl text-xs font-bold shrink-0 transition-all flex items-center gap-1.5 ${
+            className={`p-2.5 rounded-2xl text-left border transition-all flex flex-col justify-between min-h-[68px] ${
               activeTab === 'cash_sale'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-700/20'
-                : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'
+                ? 'bg-emerald-600 text-white border-emerald-700 shadow-md shadow-emerald-700/20 ring-2 ring-emerald-300'
+                : 'bg-white text-slate-700 border-slate-200/80 hover:bg-slate-50'
             }`}
           >
-            <Banknote className="w-3.5 h-3.5" />
-            <span>Nakit Satış</span>
+            <div className="flex items-center justify-between w-full">
+              <div
+                className={`w-7 h-7 rounded-lg flex items-center justify-center ${
+                  activeTab === 'cash_sale' ? 'bg-white/20 text-white' : 'bg-emerald-50 text-emerald-600'
+                }`}
+              >
+                <Banknote className="w-4 h-4" />
+              </div>
+              <span
+                className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${
+                  activeTab === 'cash_sale' ? 'bg-white/20 text-white' : 'bg-emerald-100 text-emerald-800'
+                }`}
+              >
+                +Nakit
+              </span>
+            </div>
+            <span className="text-xs font-bold tracking-tight mt-1 truncate">Nakit Satış</span>
           </button>
 
+          {/* 2. Kredi Kartı */}
           <button
             type="button"
             onClick={() => {
               setActiveTab('card_sale');
               if (editingTx?.transaction_type !== 'card_sale') setEditingTx(null);
             }}
-            className={`px-3 py-2 rounded-xl text-xs font-bold shrink-0 transition-all flex items-center gap-1.5 ${
+            className={`p-2.5 rounded-2xl text-left border transition-all flex flex-col justify-between min-h-[68px] ${
               activeTab === 'card_sale'
-                ? 'bg-purple-600 text-white shadow-md shadow-purple-700/20'
-                : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'
+                ? 'bg-purple-600 text-white border-purple-700 shadow-md shadow-purple-700/20 ring-2 ring-purple-300'
+                : 'bg-white text-slate-700 border-slate-200/80 hover:bg-slate-50'
             }`}
           >
-            <CreditCard className="w-3.5 h-3.5" />
-            <span>Kredi Kartı</span>
+            <div className="flex items-center justify-between w-full">
+              <div
+                className={`w-7 h-7 rounded-lg flex items-center justify-center ${
+                  activeTab === 'card_sale' ? 'bg-white/20 text-white' : 'bg-purple-50 text-purple-600'
+                }`}
+              >
+                <CreditCard className="w-4 h-4" />
+              </div>
+              <span
+                className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${
+                  activeTab === 'card_sale' ? 'bg-white/20 text-white' : 'bg-purple-100 text-purple-800'
+                }`}
+              >
+                POS
+              </span>
+            </div>
+            <span className="text-xs font-bold tracking-tight mt-1 truncate">Kredi Kartı</span>
           </button>
 
+          {/* 3. Bölünmüş */}
           <button
             type="button"
             onClick={() => {
               setActiveTab('split_payment');
               if (editingTx?.transaction_type !== 'split_payment') setEditingTx(null);
             }}
-            className={`px-3 py-2 rounded-xl text-xs font-bold shrink-0 transition-all flex items-center gap-1.5 ${
+            className={`p-2.5 rounded-2xl text-left border transition-all flex flex-col justify-between min-h-[68px] ${
               activeTab === 'split_payment'
-                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-700/20'
-                : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'
+                ? 'bg-indigo-600 text-white border-indigo-700 shadow-md shadow-indigo-700/20 ring-2 ring-indigo-300'
+                : 'bg-white text-slate-700 border-slate-200/80 hover:bg-slate-50'
             }`}
           >
-            <Split className="w-3.5 h-3.5" />
-            <span>Bölünmüş</span>
+            <div className="flex items-center justify-between w-full">
+              <div
+                className={`w-7 h-7 rounded-lg flex items-center justify-center ${
+                  activeTab === 'split_payment' ? 'bg-white/20 text-white' : 'bg-indigo-50 text-indigo-600'
+                }`}
+              >
+                <Split className="w-4 h-4" />
+              </div>
+              <span
+                className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${
+                  activeTab === 'split_payment' ? 'bg-white/20 text-white' : 'bg-indigo-100 text-indigo-800'
+                }`}
+              >
+                Karma
+              </span>
+            </div>
+            <span className="text-xs font-bold tracking-tight mt-1 truncate">Bölünmüş</span>
           </button>
 
+          {/* 4. Nakit İade */}
           <button
             type="button"
             onClick={() => {
               setActiveTab('cash_refund');
               if (editingTx?.transaction_type !== 'cash_refund') setEditingTx(null);
             }}
-            className={`px-3 py-2 rounded-xl text-xs font-bold shrink-0 transition-all flex items-center gap-1.5 ${
+            className={`p-2.5 rounded-2xl text-left border transition-all flex flex-col justify-between min-h-[68px] ${
               activeTab === 'cash_refund'
-                ? 'bg-red-600 text-white shadow-md shadow-red-700/20'
-                : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'
+                ? 'bg-red-600 text-white border-red-700 shadow-md shadow-red-700/20 ring-2 ring-red-300'
+                : 'bg-white text-slate-700 border-slate-200/80 hover:bg-slate-50'
             }`}
           >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Nakit İade</span>
+            <div className="flex items-center justify-between w-full">
+              <div
+                className={`w-7 h-7 rounded-lg flex items-center justify-center ${
+                  activeTab === 'cash_refund' ? 'bg-white/20 text-white' : 'bg-red-50 text-red-600'
+                }`}
+              >
+                <RotateCcw className="w-4 h-4" />
+              </div>
+              <span
+                className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${
+                  activeTab === 'cash_refund' ? 'bg-white/20 text-white' : 'bg-red-100 text-red-800'
+                }`}
+              >
+                -İade
+              </span>
+            </div>
+            <span className="text-xs font-bold tracking-tight mt-1 truncate">Nakit İade</span>
           </button>
 
+          {/* 5. Kasa Avans / Giriş */}
           <button
             type="button"
             onClick={() => {
               setActiveTab('other_in');
               if (editingTx?.transaction_type !== 'other_in') setEditingTx(null);
             }}
-            className={`px-3 py-2 rounded-xl text-xs font-bold shrink-0 transition-all flex items-center gap-1.5 ${
+            className={`p-2.5 rounded-2xl text-left border transition-all flex flex-col justify-between min-h-[68px] ${
               activeTab === 'other_in'
-                ? 'bg-blue-600 text-white shadow-md shadow-blue-700/20'
-                : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'
+                ? 'bg-blue-600 text-white border-blue-700 shadow-md shadow-blue-700/20 ring-2 ring-blue-300'
+                : 'bg-white text-slate-700 border-slate-200/80 hover:bg-slate-50'
             }`}
           >
-            <ArrowDownLeft className="w-3.5 h-3.5" />
-            <span>Diğer Giriş</span>
+            <div className="flex items-center justify-between w-full">
+              <div
+                className={`w-7 h-7 rounded-lg flex items-center justify-center ${
+                  activeTab === 'other_in' ? 'bg-white/20 text-white' : 'bg-blue-50 text-blue-600'
+                }`}
+              >
+                <ArrowDownLeft className="w-4 h-4" />
+              </div>
+              <span
+                className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${
+                  activeTab === 'other_in' ? 'bg-white/20 text-white' : 'bg-blue-100 text-blue-800'
+                }`}
+              >
+                Giriş
+              </span>
+            </div>
+            <span className="text-xs font-bold tracking-tight mt-1 truncate">Kasa Avans</span>
           </button>
 
+          {/* 6. Gider / Masraf */}
           <button
             type="button"
             onClick={() => {
               setActiveTab('other_out');
               if (editingTx?.transaction_type !== 'other_out') setEditingTx(null);
             }}
-            className={`px-3 py-2 rounded-xl text-xs font-bold shrink-0 transition-all flex items-center gap-1.5 ${
+            className={`p-2.5 rounded-2xl text-left border transition-all flex flex-col justify-between min-h-[68px] ${
               activeTab === 'other_out'
-                ? 'bg-amber-600 text-white shadow-md shadow-amber-700/20'
-                : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'
+                ? 'bg-amber-600 text-white border-amber-700 shadow-md shadow-amber-700/20 ring-2 ring-amber-300'
+                : 'bg-white text-slate-700 border-slate-200/80 hover:bg-slate-50'
             }`}
           >
-            <ArrowUpRight className="w-3.5 h-3.5" />
-            <span>Diğer Çıkış</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab('cash_count');
-              setEditingTx(null);
-            }}
-            className={`px-3 py-2 rounded-xl text-xs font-bold shrink-0 transition-all flex items-center gap-1.5 ${
-              activeTab === 'cash_count'
-                ? 'bg-[#002B70] text-white shadow-md shadow-blue-950/20'
-                : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'
-            }`}
-          >
-            <Calculator className="w-3.5 h-3.5" />
-            <span>Fiilî Sayım</span>
+            <div className="flex items-center justify-between w-full">
+              <div
+                className={`w-7 h-7 rounded-lg flex items-center justify-center ${
+                  activeTab === 'other_out' ? 'bg-white/20 text-white' : 'bg-amber-50 text-amber-600'
+                }`}
+              >
+                <ArrowUpRight className="w-4 h-4" />
+              </div>
+              <span
+                className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${
+                  activeTab === 'other_out' ? 'bg-white/20 text-white' : 'bg-amber-100 text-amber-800'
+                }`}
+              >
+                Masraf
+              </span>
+            </div>
+            <span className="text-xs font-bold tracking-tight mt-1 truncate">Gider / Masraf</span>
           </button>
         </div>
       </div>
 
       {/* Doğrudan İşlem Giriş Kartı */}
-      <div className={`bg-white rounded-2xl p-4 border shadow-xs transition-all ${editingTx ? 'border-amber-400 ring-2 ring-amber-200' : 'border-slate-200/80'}`}>
+      <div
+        className={`bg-white rounded-2xl p-4 border shadow-xs transition-all ${
+          editingTx ? 'border-amber-400 ring-2 ring-amber-200' : 'border-slate-200/80'
+        }`}
+      >
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-bold text-slate-900">
+            <span className="text-xs font-extrabold text-slate-900">
               {editingTx
                 ? 'İşlemi Düzenle'
                 : activeTab === 'cash_sale'
-                ? 'Nakit Satış Kaydı'
+                ? 'Nakit Satış Girişi'
                 : activeTab === 'card_sale'
-                ? 'Kredi Kartı Satış Kaydı'
+                ? 'Kredi Kartı Satış Girişi'
                 : activeTab === 'split_payment'
                 ? 'Bölünmüş Ödeme (Nakit + Kart)'
                 : activeTab === 'cash_refund'
-                ? 'Nakit İade Kaydı'
+                ? 'Nakit İade Girişi'
                 : activeTab === 'other_in'
-                ? 'Diğer Nakit Girişi'
-                : activeTab === 'other_out'
-                ? 'Diğer Nakit Çıkışı'
-                : 'Fiilî Kasa Sayımı Yap'}
+                ? 'Kasa Avans / Para Girişi'
+                : 'Gider / Masraf Çıkışı'}
             </span>
           </div>
           {editingTx && (
@@ -736,13 +920,9 @@ export const CashView: React.FC<CashViewProps> = ({
 
               {/* Net Nakit Anlık Önizleme */}
               <div className="bg-emerald-50 border border-emerald-200/80 rounded-xl p-2.5 flex items-center justify-between text-xs">
-                <span className="font-semibold text-emerald-900">
-                  Kasaya Girecek Net Nakit:
-                </span>
+                <span className="font-semibold text-emerald-900">Kasaya Girecek Net Nakit:</span>
                 <span className="font-extrabold text-emerald-700 text-sm tabular-nums">
-                  {liveNetCashSale.isValid
-                    ? formatCurrency(liveNetCashSale.netCash)
-                    : '₺0,00'}
+                  {liveNetCashSale.isValid ? formatCurrency(liveNetCashSale.netCash) : '₺0,00'}
                 </span>
               </div>
             </div>
@@ -750,26 +930,21 @@ export const CashView: React.FC<CashViewProps> = ({
 
           {/* TAB 2: Kredi Kartı */}
           {activeTab === 'card_sale' && (
-            <div className="space-y-3">
-              <div>
-                <label htmlFor="card-amount" className="block text-xs font-bold text-slate-700 mb-1">
-                  Karttan Çekilen Tutar (TL)
-                </label>
-                <input
-                  id="card-amount"
-                  type="number"
-                  step="0.01"
-                  min="0.01"
-                  value={cardAmountInput}
-                  onChange={(e) => setCardAmountInput(e.target.value)}
-                  placeholder="Örn: 1000"
-                  required
-                  className="w-full px-3 py-2 text-sm font-semibold rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-purple-500 tabular-nums"
-                />
-              </div>
-              <div className="bg-purple-50 border border-purple-200/80 rounded-xl p-2.5 text-[11px] text-purple-900 leading-relaxed">
-                Kart satışları kasaya/nakit çekmecesine girmez, ciro toplamına eklenir.
-              </div>
+            <div>
+              <label htmlFor="card-amount" className="block text-xs font-bold text-slate-700 mb-1">
+                Kredi Kartı / POS Satış Tutarı (TL)
+              </label>
+              <input
+                id="card-amount"
+                type="number"
+                step="0.01"
+                min="0.01"
+                value={cardAmountInput}
+                onChange={(e) => setCardAmountInput(e.target.value)}
+                placeholder="Örn: 350.00"
+                required
+                className="w-full px-3 py-2 text-sm font-semibold rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-purple-500 tabular-nums"
+              />
             </div>
           )}
 
@@ -779,7 +954,7 @@ export const CashView: React.FC<CashViewProps> = ({
               <div className="grid grid-cols-2 gap-2.5">
                 <div>
                   <label htmlFor="split-cash" className="block text-xs font-bold text-slate-700 mb-1">
-                    Nakit Alınan (TL)
+                    Alınan Nakit (TL)
                   </label>
                   <input
                     id="split-cash"
@@ -788,7 +963,7 @@ export const CashView: React.FC<CashViewProps> = ({
                     min="0"
                     value={splitCashInput}
                     onChange={(e) => setSplitCashInput(e.target.value)}
-                    placeholder="Örn: 600"
+                    placeholder="Örn: 200"
                     className="w-full px-3 py-2 text-sm font-semibold rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 tabular-nums"
                   />
                 </div>
@@ -803,7 +978,7 @@ export const CashView: React.FC<CashViewProps> = ({
                     min="0"
                     value={splitCardInput}
                     onChange={(e) => setSplitCardInput(e.target.value)}
-                    placeholder="Örn: 500"
+                    placeholder="Örn: 300"
                     className="w-full px-3 py-2 text-sm font-semibold rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 tabular-nums"
                   />
                 </div>
@@ -811,7 +986,7 @@ export const CashView: React.FC<CashViewProps> = ({
 
               <div>
                 <label htmlFor="split-change" className="block text-xs font-bold text-slate-700 mb-1">
-                  Verilen Para Üstü (TL)
+                  Verilen Para Üstü (Varsa TL)
                 </label>
                 <input
                   id="split-change"
@@ -820,28 +995,23 @@ export const CashView: React.FC<CashViewProps> = ({
                   min="0"
                   value={splitChangeInput}
                   onChange={(e) => setSplitChangeInput(e.target.value)}
-                  placeholder="Yalnızca nakit kısımdan düşülür (Örn: 200)"
+                  placeholder="Örn: 50"
                   className="w-full px-3 py-2 text-sm font-semibold rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 tabular-nums"
                 />
               </div>
 
-              <div className="bg-indigo-50 border border-indigo-200/80 rounded-xl p-2.5 text-xs space-y-1">
-                <div className="flex justify-between text-indigo-900 font-semibold">
-                  <span>Net Nakit Girişi:</span>
-                  <span className="tabular-nums font-bold">
-                    {formatCurrency(liveSplitCalc.netCash)}
+              {/* Anlık Bölünmüş Satış Özeti */}
+              <div className="bg-indigo-50 border border-indigo-200/80 rounded-xl p-2.5 grid grid-cols-2 gap-2 text-xs">
+                <div>
+                  <span className="text-indigo-900 block font-medium">Net Nakit:</span>
+                  <span className="font-extrabold text-indigo-700 tabular-nums">
+                    {liveSplitCalc.isValid ? formatCurrency(liveSplitCalc.netCash) : '₺0,00'}
                   </span>
                 </div>
-                <div className="flex justify-between text-indigo-900 font-semibold">
-                  <span>Kart Satış Etkisi:</span>
-                  <span className="tabular-nums font-bold">
-                    {formatCurrency(liveSplitCalc.cardAmount)}
-                  </span>
-                </div>
-                <div className="flex justify-between text-indigo-950 font-extrabold border-t border-indigo-200 pt-1">
-                  <span>Toplam Satış (Ciro):</span>
-                  <span className="tabular-nums">
-                    {formatCurrency(liveSplitCalc.totalSale)}
+                <div>
+                  <span className="text-indigo-900 block font-medium">Toplam Satış:</span>
+                  <span className="font-extrabold text-indigo-900 tabular-nums">
+                    {liveSplitCalc.isValid ? formatCurrency(liveSplitCalc.totalSale) : '₺0,00'}
                   </span>
                 </div>
               </div>
@@ -876,7 +1046,7 @@ export const CashView: React.FC<CashViewProps> = ({
                   type="text"
                   value={refundDescInput}
                   onChange={(e) => setRefundDescInput(e.target.value)}
-                  placeholder="Örn: Ürün bozuk iadesi"
+                  placeholder="Örn: Ürün iadesi"
                   className="w-full px-3 py-2 text-sm rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-red-500"
                 />
               </div>
@@ -904,7 +1074,7 @@ export const CashView: React.FC<CashViewProps> = ({
               </div>
               <div>
                 <label htmlFor="other-in-desc" className="block text-xs font-bold text-slate-700 mb-1">
-                  Açıklama
+                  Açıklama / Kaynak
                 </label>
                 <input
                   id="other-in-desc"
@@ -939,104 +1109,17 @@ export const CashView: React.FC<CashViewProps> = ({
               </div>
               <div>
                 <label htmlFor="other-out-desc" className="block text-xs font-bold text-slate-700 mb-1">
-                  Açıklama
+                  Açıklama / Masraf Kalemi
                 </label>
                 <input
                   id="other-out-desc"
                   type="text"
                   value={otherOutDescInput}
                   onChange={(e) => setOtherOutDescInput(e.target.value)}
-                  placeholder="Örn: Mağaza temizlik masrafı"
+                  placeholder="Örn: Mağaza sarf malzeme masrafı"
                   className="w-full px-3 py-2 text-sm rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-amber-500"
                 />
               </div>
-            </div>
-          )}
-
-          {/* TAB 7: Fiilî Sayım */}
-          {activeTab === 'cash_count' && (
-            <div className="space-y-3">
-              <div>
-                <label htmlFor="actual-cash" className="block text-xs font-bold text-slate-700 mb-1">
-                  Sayılan Gerçek Nakit (TL)
-                </label>
-                <input
-                  id="actual-cash"
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  value={actualCashInput}
-                  onChange={(e) => setActualCashInput(e.target.value)}
-                  placeholder="Örn: 1450.00"
-                  required
-                  className="w-full px-3 py-2 text-sm font-semibold rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-[#002B70] tabular-nums"
-                />
-              </div>
-
-              <div>
-                <label htmlFor="count-notes" className="block text-xs font-bold text-slate-700 mb-1">
-                  Sayım Notu (İsteğe Bağlı)
-                </label>
-                <input
-                  id="count-notes"
-                  type="text"
-                  value={countNotesInput}
-                  onChange={(e) => setCountNotesInput(e.target.value)}
-                  placeholder="Örn: Akşam sayımı"
-                  className="w-full px-3 py-2 text-sm rounded-xl border border-slate-200 focus:outline-none"
-                />
-              </div>
-
-              {/* Anlık Sayım Karşılaştırma Kartı */}
-              {actualCashInput && (
-                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs space-y-1.5">
-                  <div className="flex justify-between text-slate-600">
-                    <span>Beklenen Kasa:</span>
-                    <span className="font-bold tabular-nums">
-                      {formatCurrency(totals.expectedCash)}
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-slate-600">
-                    <span>Sayılan Kasa:</span>
-                    <span className="font-bold tabular-nums">
-                      {formatCurrency(parseFloat(actualCashInput) || 0)}
-                    </span>
-                  </div>
-
-                  <div className="border-t border-slate-200 pt-1.5 flex justify-between items-center font-bold">
-                    <span>Kasa Farkı:</span>
-                    {totals.startingCashKnown ? (
-                      (() => {
-                        const countEval = evaluateCashCount(
-                          parseFloat(actualCashInput) || 0,
-                          totals.expectedCash,
-                          true
-                        );
-                        return (
-                          <span
-                            className={`px-2 py-0.5 rounded-lg text-xs tabular-nums ${
-                              countEval.status === 'surplus'
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : countEval.status === 'deficit'
-                                ? 'bg-red-100 text-red-800'
-                                : 'bg-slate-200 text-slate-800'
-                            }`}
-                          >
-                            {countEval.status === 'surplus' && 'Kasa Fazlası: '}
-                            {countEval.status === 'deficit' && 'Kasa Açığı: '}
-                            {countEval.status === 'exact' && 'Tam / Denk: '}
-                            {countEval.formattedDifference}
-                          </span>
-                        );
-                      })()
-                    ) : (
-                      <span className="text-[11px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md">
-                        Başlangıç kasası bilinmediği için kesin fark hesaplanamaz
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
             </div>
           )}
 
@@ -1063,9 +1146,7 @@ export const CashView: React.FC<CashViewProps> = ({
                 ? 'bg-red-600 hover:bg-red-700'
                 : activeTab === 'other_in'
                 ? 'bg-blue-600 hover:bg-blue-700'
-                : activeTab === 'other_out'
-                ? 'bg-amber-600 hover:bg-amber-700'
-                : 'bg-[#002B70] hover:bg-[#001D4D]'
+                : 'bg-amber-600 hover:bg-amber-700'
             } shadow-md`}
           >
             {isSubmitting ? (
@@ -1078,14 +1159,204 @@ export const CashView: React.FC<CashViewProps> = ({
             ) : (
               <>
                 <Plus className="w-3.5 h-3.5" />
-                <span>
-                  {activeTab === 'cash_count' ? 'Sayımı Kaydet' : 'İşlemi Kaydet'}
-                </span>
+                <span>İşlemi Kaydet</span>
               </>
             )}
           </button>
         </form>
       </div>
+
+      {/* ===================================================================== */}
+      {/* FİİLÎ KASA SAYIMI MODAL/DRAWER (BANKNOT VE MADENİ PARA ADETLERİ)     */}
+      {/* ===================================================================== */}
+      {isCountModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-md w-full max-h-[92vh] flex flex-col shadow-2xl overflow-hidden border border-slate-100">
+            {/* Modal Header */}
+            <div className="p-4 bg-gradient-to-r from-[#002B70] to-[#0055D4] text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-white/10 flex items-center justify-center text-[#FFE000]">
+                  <Coins className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold text-white">Fiilî Kasa Sayımı</h3>
+                  <p className="text-[10px] text-blue-200">Banknot ve Madeni Para Adetleri</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCountModalOpen(false)}
+                className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Modal Body: Denomination Rows */}
+            <div className="p-4 overflow-y-auto space-y-2.5 flex-1 divide-y divide-slate-100">
+              <div className="flex items-center justify-between text-xs font-bold text-slate-500 pb-1">
+                <span>Küpür / Nominal</span>
+                <span>Adet ve Toplam</span>
+              </div>
+
+              {DENOMINATIONS.map((item) => {
+                const count = denomCounts[item.key] || 0;
+                const rowTotal = item.value * count;
+
+                return (
+                  <div key={item.key} className="pt-2.5 flex items-center justify-between gap-2">
+                    {/* Küpür Rozeti */}
+                    <div className="flex items-center gap-2 shrink-0 w-24">
+                      <span className={`text-xs font-black px-2.5 py-1 rounded-xl ${item.badgeBg} ${item.badgeText} border border-slate-200/60 shadow-2xs`}>
+                        {item.label}
+                      </span>
+                    </div>
+
+                    {/* Adet Kontrol Butonları & Input */}
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => updateDenomCount(item.key, -1)}
+                        className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 font-bold text-sm flex items-center justify-center"
+                      >
+                        -
+                      </button>
+                      <input
+                        type="number"
+                        min="0"
+                        value={count === 0 ? '' : count}
+                        onChange={(e) => setDenomDirect(item.key, e.target.value)}
+                        placeholder="0"
+                        className="w-14 h-7 text-center font-bold text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-1 focus:ring-blue-600 tabular-nums"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => updateDenomCount(item.key, 1)}
+                        className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 font-bold text-sm flex items-center justify-center"
+                      >
+                        +
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => updateDenomCount(item.key, 5)}
+                        className="px-1.5 h-7 rounded-lg bg-blue-50 text-blue-700 font-bold text-[10px] hover:bg-blue-100 active:scale-95"
+                        title="+5 Adet Ekle"
+                      >
+                        +5
+                      </button>
+                    </div>
+
+                    {/* Satır Toplamı */}
+                    <div className="text-right w-24 shrink-0">
+                      <span className="text-xs font-bold text-slate-900 tabular-nums">
+                        {formatCurrency(rowTotal)}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {/* Not Alanı */}
+              <div className="pt-3">
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Sayım Notu (İsteğe Bağlı)
+                </label>
+                <input
+                  type="text"
+                  value={countNote}
+                  onChange={(e) => setCountNote(e.target.value)}
+                  placeholder="Örn: Gün ortası sayımı"
+                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-[#002B70]"
+                />
+              </div>
+            </div>
+
+            {/* Modal Footer: Live Comparison & Action */}
+            <div className="p-4 bg-slate-50 border-t border-slate-200 shrink-0 space-y-3">
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="bg-white p-2.5 rounded-xl border border-slate-200">
+                  <span className="text-[10px] text-slate-500 font-semibold block">Sayılan Fiilî Kasa:</span>
+                  <span className="text-base font-black text-[#002B70] tabular-nums">
+                    {formatCurrency(physicalCountTotal)}
+                  </span>
+                </div>
+                <div className="bg-white p-2.5 rounded-xl border border-slate-200">
+                  <span className="text-[10px] text-slate-500 font-semibold block">Beklenen Kasa Nakdi:</span>
+                  <span className="text-base font-black text-slate-800 tabular-nums">
+                    {formatCurrency(totals.expectedCash)}
+                  </span>
+                </div>
+              </div>
+
+              {/* Fark Göstergesi (Açık / Fazla / Denk) */}
+              <div
+                className={`p-3 rounded-2xl border flex items-center justify-between text-xs font-bold ${
+                  isExact
+                    ? 'bg-blue-50 border-blue-200 text-blue-900'
+                    : isSurplus
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-red-50 border-red-200 text-red-900'
+                }`}
+              >
+                <div className="flex items-center gap-1.5">
+                  {isExact ? (
+                    <CheckCircle2 className="w-4 h-4 text-blue-600 shrink-0" />
+                  ) : isSurplus ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                  )}
+                  <span>
+                    {isExact
+                      ? 'Kasa Tam Denk'
+                      : isSurplus
+                      ? 'Kasa Fazlası Var'
+                      : 'Kasa Açığı Var'}
+                  </span>
+                </div>
+                <span className="text-sm font-black tabular-nums">
+                  {isExact
+                    ? '₺0,00'
+                    : isSurplus
+                    ? `+${formatCurrency(differenceAmount)}`
+                    : formatCurrency(differenceAmount)}
+                </span>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleResetCounts}
+                  className="px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-600 font-bold text-xs hover:bg-slate-100 active:scale-95"
+                >
+                  Sıfırla
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSavePhysicalCount}
+                  disabled={isSavingCount}
+                  className="flex-1 py-2.5 rounded-xl bg-[#002B70] hover:bg-[#001D4D] text-[#FFE000] font-black text-xs shadow-md active:scale-95 transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+                >
+                  {isSavingCount ? (
+                    <span>Kaydediliyor...</span>
+                  ) : countSaveSuccess ? (
+                    <>
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                      <span>Sayım Kaydedildi!</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>Sayımı Kaydet ve Onayla</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Kasa Hareketleri Geçmişi */}
       <div className="space-y-2.5">
@@ -1099,7 +1370,7 @@ export const CashView: React.FC<CashViewProps> = ({
         <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs divide-y divide-slate-100 overflow-hidden">
           {shiftTransactions.length === 0 ? (
             <div className="p-8 text-center text-slate-400 text-xs">
-              Bu vardiyada henüz bir kasa işlemi kaydedilmedi.
+              Bu gün için henüz bir kasa işlemi kaydedilmedi.
             </div>
           ) : (
             shiftTransactions.map((tx) => {
@@ -1166,7 +1437,7 @@ export const CashView: React.FC<CashViewProps> = ({
                           {isSplit && 'Bölünmüş'}
                           {isRefund && 'İade'}
                           {isOtherIn && 'Giriş'}
-                          {isOtherOut && 'Çıkış'}
+                          {isOtherOut && 'Masraf'}
                         </span>
                       </div>
                       <p className="text-[11px] text-slate-500 truncate mt-0.5">

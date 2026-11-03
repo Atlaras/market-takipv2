@@ -175,57 +175,39 @@ export const QRView: React.FC<QRViewProps> = ({
         </div>
       </div>
 
-      {/* QR İstatistikleri: Günlük / Aylık / Genel */}
-      <div className="grid grid-cols-3 gap-2">
+      {/* QR İstatistikleri: Yalnızca Günlük ve Genel (Aylık Raporlar sekmesindedir) */}
+      <div className="grid grid-cols-2 gap-3">
         {/* Günlük */}
-        <div className="bg-white rounded-2xl p-3 border border-slate-200/80 shadow-xs flex flex-col justify-between">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded-md">
+        <div className="bg-white rounded-2xl p-3.5 border border-slate-200/80 shadow-xs flex flex-col justify-between">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md">
               Günlük
             </span>
-            <Users className="w-3.5 h-3.5 text-blue-600" />
+            <Users className="w-4 h-4 text-blue-600" />
           </div>
           <div>
-            <p className="text-base font-black text-slate-900 tabular-nums">
+            <p className="text-lg font-black text-slate-900 tabular-nums">
               {formatCurrency(todayTotal)}
             </p>
-            <p className="text-[11px] font-medium text-slate-500 mt-0.5">
+            <p className="text-xs font-semibold text-slate-500 mt-0.5">
               {todayCount} Müşteri / İşlem
             </p>
           </div>
         </div>
 
-        {/* Aylık */}
-        <div className="bg-white rounded-2xl p-3 border border-slate-200/80 shadow-xs flex flex-col justify-between">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded-md">
-              Aylık
-            </span>
-            <Calendar className="w-3.5 h-3.5 text-purple-600" />
-          </div>
-          <div>
-            <p className="text-base font-black text-slate-900 tabular-nums">
-              {formatCurrency(monthTotal)}
-            </p>
-            <p className="text-[11px] font-medium text-slate-500 mt-0.5">
-              {monthCount} Müşteri / İşlem
-            </p>
-          </div>
-        </div>
-
         {/* Genel */}
-        <div className="bg-white rounded-2xl p-3 border border-slate-200/80 shadow-xs flex flex-col justify-between">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded-md">
+        <div className="bg-white rounded-2xl p-3.5 border border-slate-200/80 shadow-xs flex flex-col justify-between">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-[#002B70] bg-amber-100 text-amber-900 px-2 py-0.5 rounded-md">
               Genel
             </span>
-            <Layers className="w-3.5 h-3.5 text-slate-600" />
+            <Layers className="w-4 h-4 text-[#002B70]" />
           </div>
           <div>
-            <p className="text-base font-black text-slate-900 tabular-nums">
+            <p className="text-lg font-black text-slate-900 tabular-nums">
               {formatCurrency(generalTotal)}
             </p>
-            <p className="text-[11px] font-medium text-slate-500 mt-0.5">
+            <p className="text-xs font-semibold text-slate-500 mt-0.5">
               {generalCount} Müşteri / İşlem
             </p>
           </div>

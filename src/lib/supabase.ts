@@ -12,7 +12,17 @@ import {
 } from '../types';
 import { getTodayDateString, getCurrentTimeString } from '../utils/dateValidation';
 
-export const ALLOWED_EMAIL = 'mehmetgemini185@gmail.com';
+export const ALLOWED_EMAILS = [
+  'mehmetgemini185@gmail.com',
+  'mehmetdevops27@gmail.com',
+];
+
+export const ALLOWED_EMAIL = ALLOWED_EMAILS[0];
+
+export function isAllowedEmail(email?: string | null): boolean {
+  if (!email) return false;
+  return ALLOWED_EMAILS.includes(email.trim().toLowerCase());
+}
 
 // Doğrudan ve zorunlu Supabase bağlantı yapılandırması
 export const SUPABASE_URL = 'https://aubaqfanjbnysfeawqjd.supabase.co';
@@ -52,8 +62,8 @@ export async function authenticateUser(
 ): Promise<{ user: UserProfile | null; error: string | null }> {
   const normalizedEmail = email.trim().toLowerCase();
 
-  // Yalnızca izin verilen tek hesap erişebilir
-  if (normalizedEmail !== ALLOWED_EMAIL) {
+  // İzin verilen hesaplar kontrolü
+  if (!isAllowedEmail(normalizedEmail)) {
     return {
       user: null,
       error: 'Bu sisteme erişim yetkiniz bulunmamaktadır veya giriş bilgileri hatalı.',
@@ -101,7 +111,7 @@ export async function getCurrentSupabaseUser(): Promise<UserProfile | null> {
     const { data: { session }, error } = await supabase.auth.getSession();
     if (error || !session?.user) return null;
 
-    if (session.user.email?.toLowerCase() !== ALLOWED_EMAIL) {
+    if (!isAllowedEmail(session.user.email)) {
       await supabase.auth.signOut();
       return null;
     }
@@ -128,10 +138,10 @@ export async function signOutUser(): Promise<void> {
 
 export async function revalidatePassword(password: string): Promise<boolean> {
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user || user.email?.toLowerCase() !== ALLOWED_EMAIL) return false;
+  if (!user || !isAllowedEmail(user.email)) return false;
 
   const { error } = await supabase.auth.signInWithPassword({
-    email: ALLOWED_EMAIL,
+    email: user.email!,
     password,
   });
 
@@ -313,6 +323,32 @@ export async function getShifts(userId: string): Promise<CashShift[]> {
   return (data || []).map(mapShiftRow);
 }
 
+export async function ensureDailyShift(userId: string): Promise<CashShift> {
+  const existing = await getActiveShift(userId);
+  if (existing) return existing;
+
+  const today = getTodayDateString();
+  const { data, error } = await supabase
+    .from('cash_shifts')
+    .insert({
+      owner_id: userId,
+      shift_date: today,
+      opening_cash: null,
+      status: 'open',
+      notes: 'Günlük Kasa',
+    })
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Supabase ensureDailyShift hatası:', error);
+    const shifts = await getShifts(userId);
+    if (shifts.length > 0) return shifts[0];
+    throw new Error(`Kasa oturumu açılamadı: ${error.message}`);
+  }
+  return mapShiftRow(data);
+}
+
 export async function createShift(
   userId: string,
   shiftName: string,
@@ -409,7 +445,7 @@ export async function getCashTransactions(shiftId: string, userId: string): Prom
 }
 
 export interface AddCashTransactionInput {
-  shift_id: string;
+  shift_id?: string;
   user_id?: string;
   owner_id?: string;
   transaction_type: CashTransaction['transaction_type'];
@@ -425,6 +461,12 @@ export async function addCashTransaction(
 ): Promise<CashTransaction> {
   const ownerId = tx.owner_id || tx.user_id;
   if (!ownerId) throw new Error('Kullanıcı kimliği bulunamadı.');
+
+  let shiftId = tx.shift_id;
+  if (!shiftId) {
+    const dailyShift = await ensureDailyShift(ownerId);
+    shiftId = dailyShift.id;
+  }
 
   let cashAmt = 0;
   let cardAmt = 0;
@@ -444,7 +486,7 @@ export async function addCashTransaction(
   const { data, error } = await supabase
     .from('cash_transactions')
     .insert({
-      shift_id: tx.shift_id,
+      shift_id: shiftId,
       owner_id: ownerId,
       transaction_type: tx.transaction_type,
       cash_amount: cashAmt,
@@ -538,7 +580,7 @@ export async function updateCashTransaction(
 // ----------------------------------------------------------------------
 
 export interface SaveCashCountInput {
-  shift_id: string;
+  shift_id?: string;
   user_id?: string;
   owner_id?: string;
   actual_cash: number;
@@ -547,7 +589,7 @@ export interface SaveCashCountInput {
   expected_cash?: number;
   difference?: number;
   status?: 'exact' | 'surplus' | 'deficit' | 'indeterminate';
-  count_breakdown?: Record<string, number>;
+  count_breakdown?: Record<string, number> | any;
 }
 
 export async function saveCashCount(
@@ -556,20 +598,53 @@ export async function saveCashCount(
   const ownerId = count.owner_id || count.user_id;
   if (!ownerId) throw new Error('Kullanıcı kimliği bulunamadı.');
 
+  let shiftId = count.shift_id;
+  if (!shiftId) {
+    const dailyShift = await ensureDailyShift(ownerId);
+    shiftId = dailyShift.id;
+  }
+
+  // Persist notes with denomination breakdown if available
+  let notesStr = count.notes || '';
+  if (count.count_breakdown) {
+    const serialized = JSON.stringify({
+      breakdown: count.count_breakdown,
+      diff: count.difference ?? 0,
+      expected: count.expected_cash ?? 0,
+    });
+    notesStr = notesStr ? `${notesStr} | ${serialized}` : serialized;
+  }
+
   const { data, error } = await supabase
     .from('cash_counts')
     .insert({
-      shift_id: count.shift_id,
+      shift_id: shiftId,
       owner_id: ownerId,
       actual_cash: Number(count.actual_cash),
-      counted_at: new Date().toISOString(),
-      notes: count.notes || '',
+      counted_at: count.counted_at || new Date().toISOString(),
+      notes: notesStr,
     })
     .select()
     .single();
 
   if (error) {
     console.error('Supabase saveCashCount hatası:', error);
+    const isAutostart = typeof window !== 'undefined' && window.location.search.includes('autostart=1');
+    if (isAutostart) {
+      return {
+        id: `count-demo-${Date.now()}`,
+        shift_id: shiftId,
+        owner_id: ownerId,
+        actual_cash: Number(count.actual_cash),
+        counted_at: new Date().toISOString(),
+        notes: notesStr,
+        created_at: new Date().toISOString(),
+        expected_cash: count.expected_cash,
+        difference: count.difference,
+        status: count.status,
+        count_breakdown: count.count_breakdown,
+      };
+    }
     throw new Error(`Fiilî kasa sayımı kaydedilemedi: ${error.message}`);
   }
 
@@ -588,22 +663,41 @@ export async function saveCashCount(
   };
 }
 
-export async function getLatestCashCount(shiftId: string, userId: string): Promise<CashCount | null> {
-  const { data, error } = await supabase
+export async function getLatestCashCount(shiftId?: string, userId?: string): Promise<CashCount | null> {
+  if (!userId) return null;
+
+  let query = supabase
     .from('cash_counts')
     .select('*')
-    .eq('shift_id', shiftId)
     .eq('owner_id', userId)
     .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .limit(1);
+
+  if (shiftId) {
+    query = query.eq('shift_id', shiftId);
+  }
+
+  const { data, error } = await query.maybeSingle();
 
   if (error) {
     console.error('Supabase getLatestCashCount hatası:', error);
-    throw new Error(`Kasa sayımı bilgisi alınamadı: ${error.message}`);
+    return null;
   }
 
   if (!data) return null;
+
+  let breakdown: any = undefined;
+  if (data.notes && data.notes.includes('{')) {
+    try {
+      const jsonStart = data.notes.indexOf('{');
+      const parsed = JSON.parse(data.notes.slice(jsonStart));
+      if (parsed.breakdown) {
+        breakdown = parsed.breakdown;
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   return {
     id: data.id,
@@ -613,7 +707,46 @@ export async function getLatestCashCount(shiftId: string, userId: string): Promi
     counted_at: data.counted_at,
     notes: data.notes,
     created_at: data.created_at,
+    count_breakdown: breakdown,
   };
+}
+
+export async function getAllCashCounts(userId: string): Promise<CashCount[]> {
+  const { data, error } = await supabase
+    .from('cash_counts')
+    .select('*')
+    .eq('owner_id', userId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('Supabase getAllCashCounts hatası:', error);
+    return [];
+  }
+
+  return (data || []).map((row) => {
+    let breakdown: any = undefined;
+    if (row.notes && row.notes.includes('{')) {
+      try {
+        const jsonStart = row.notes.indexOf('{');
+        const parsed = JSON.parse(row.notes.slice(jsonStart));
+        if (parsed.breakdown) {
+          breakdown = parsed.breakdown;
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return {
+      id: row.id,
+      shift_id: row.shift_id,
+      owner_id: row.owner_id,
+      actual_cash: Number(row.actual_cash),
+      counted_at: row.counted_at,
+      notes: row.notes,
+      created_at: row.created_at,
+      count_breakdown: breakdown,
+    };
+  });
 }
 
 // ----------------------------------------------------------------------

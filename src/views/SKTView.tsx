@@ -13,6 +13,9 @@ import {
   History,
   X,
   ChevronDown,
+  Tag,
+  Trash,
+  Sparkles,
 } from 'lucide-react';
 import { Product, ProductBatch, BatchStatus, UserProfile, BatchStatusHistory } from '../types';
 import {
@@ -42,8 +45,8 @@ export const SKTView: React.FC<SKTViewProps> = ({
   batches,
   onDataUpdated,
 }) => {
-  // Tabs: all, critical, warning, expired, products
-  const [activeTab, setActiveTab] = useState<'all' | 'critical' | 'warning' | 'expired' | 'products'>('all');
+  // Tabs: 'all' | 'need_discount' | 'need_disposal' | 'disposed' | 'products'
+  const [activeTab, setActiveTab] = useState<'all' | 'need_discount' | 'need_disposal' | 'disposed' | 'products'>('all');
   const [searchQuery, setSearchQuery] = useState('');
 
   // Modals
@@ -52,6 +55,10 @@ export const SKTView: React.FC<SKTViewProps> = ({
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
   const [selectedBatchHistory, setSelectedBatchHistory] = useState<BatchStatusHistory[]>([]);
   const [selectedBatchTitle, setSelectedBatchTitle] = useState('');
+
+  // Quick Discount Modal
+  const [discountModalBatch, setDiscountModalBatch] = useState<ProductBatch | null>(null);
+  const [discountRate, setDiscountRate] = useState<number>(25);
 
   // Batch Form State
   const [editingBatch, setEditingBatch] = useState<ProductBatch | null>(null);
@@ -71,7 +78,20 @@ export const SKTView: React.FC<SKTViewProps> = ({
 
   const todayStr = getTodayDateString();
 
-  // Filter batches
+  // Categorize batches
+  const batchesNeedDiscount = batches.filter((b) => {
+    if (b.status === 'disposed' || b.status === 'consumed') return false;
+    const { category } = getExpirationCategory(b.expiration_date);
+    return category === 'critical' || category === 'warning';
+  });
+
+  const batchesNeedDisposal = batches.filter((b) => {
+    if (b.status === 'disposed') return false;
+    const { category } = getExpirationCategory(b.expiration_date);
+    return category === 'expired';
+  });
+
+  // Filter batches based on tab and search
   const filteredBatches = batches.filter((b) => {
     // Search match
     const pName = b.product?.name || '';
@@ -85,11 +105,67 @@ export const SKTView: React.FC<SKTViewProps> = ({
     if (!matchesSearch) return false;
 
     const { category } = getExpirationCategory(b.expiration_date);
-    if (activeTab === 'critical') return category === 'critical';
-    if (activeTab === 'warning') return category === 'warning';
-    if (activeTab === 'expired') return category === 'expired';
-    return true;
+
+    if (activeTab === 'need_discount') {
+      return (category === 'critical' || category === 'warning') && b.status !== 'disposed';
+    }
+    if (activeTab === 'need_disposal') {
+      return category === 'expired' && b.status !== 'disposed';
+    }
+    if (activeTab === 'disposed') {
+      return b.status === 'disposed';
+    }
+    // 'all' tab shows non-disposed items by default
+    return b.status !== 'disposed';
   });
+
+  // Quick Action: Mark Disposed (Topla ve İmha Girişi Yap)
+  const handleQuickDispose = async (batch: ProductBatch) => {
+    const pName = batch.product?.name || 'Ürün';
+    if (
+      window.confirm(
+        `"${pName}" ürününü reyonlardan toplayıp İMHA girişi yapmak istediğinize emin misiniz?`
+      )
+    ) {
+      const existingNotes = batch.notes ? `${batch.notes} | ` : '';
+      const updatedNotes = `${existingNotes}[RAFTAN TOPLANDI & İMHA EDİLDİ - ${formatTurkishDate(todayStr)}]`;
+
+      await saveBatch({
+        id: batch.id,
+        product_id: batch.product_id,
+        user_id: user.id,
+        batch_number: batch.batch_number,
+        quantity: batch.quantity,
+        expiration_date: batch.expiration_date,
+        status: 'disposed',
+        notes: updatedNotes,
+      });
+
+      onDataUpdated();
+    }
+  };
+
+  // Quick Action: Apply Discount (İndirim Girişi Yap)
+  const handleApplyDiscountSubmit = async () => {
+    if (!discountModalBatch) return;
+
+    const existingNotes = discountModalBatch.notes ? `${discountModalBatch.notes} | ` : '';
+    const updatedNotes = `${existingNotes}[SARI ETİKET %${discountRate} İNDİRİMİ UYGULANDI - ${formatTurkishDate(todayStr)}]`;
+
+    await saveBatch({
+      id: discountModalBatch.id,
+      product_id: discountModalBatch.product_id,
+      user_id: user.id,
+      batch_number: discountModalBatch.batch_number,
+      quantity: discountModalBatch.quantity,
+      expiration_date: discountModalBatch.expiration_date,
+      status: discountModalBatch.status,
+      notes: updatedNotes,
+    });
+
+    setDiscountModalBatch(null);
+    onDataUpdated();
+  };
 
   // Open add batch modal
   const handleOpenAddBatch = () => {
@@ -97,7 +173,6 @@ export const SKTView: React.FC<SKTViewProps> = ({
     setBatchProductId(products[0]?.id || '');
     setBatchNumber(`PRT-${Date.now().toString().slice(-4)}`);
     setBatchQuantity('1');
-    // Future date is default and normal!
     const in14Days = new Date(Date.now() + 86400000 * 14).toISOString().split('T')[0];
     setBatchExpDate(in14Days);
     setBatchStatus('active');
@@ -178,19 +253,93 @@ export const SKTView: React.FC<SKTViewProps> = ({
 
   // Delete product
   const handleDeleteProduct = async (id: string, name: string) => {
-    if (window.confirm(`"${name}" ürününü ve bu ürüne ait tüm partileri silmek istediğinize emin misiniz?`)) {
+    if (window.confirm(`"${name}" ürününü ve tüm partilerini silmek istediğinize emin misiniz?`)) {
       await deleteProduct(id, user.id);
       onDataUpdated();
     }
   };
 
   return (
-    <div className="space-y-4 pb-24 px-4">
-      {/* Top Action Bar */}
+    <div className="space-y-4 pb-28 px-4 max-w-lg mx-auto">
+      {/* ===================================================================== */}
+      {/* 1. ÖZEL AKSİYON PANOLARI: TARİHİ YAKLAŞAN & TARİHİ GEÇEN ÇAĞRILARI   */}
+      {/* ===================================================================== */}
+
+      {/* A. TARİHİ YAKLAŞMIŞ ÜRÜNLER (İNDİRİM GİRİŞİ YAP) */}
+      <div className="bg-gradient-to-r from-amber-500 to-amber-600 rounded-3xl p-4 text-white shadow-lg shadow-amber-900/15">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <div className="w-9 h-9 rounded-2xl bg-white/20 flex items-center justify-center shrink-0 mt-0.5">
+              <Tag className="w-5 h-5 text-amber-100" />
+            </div>
+            <div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-black uppercase tracking-wider bg-black/20 px-2 py-0.5 rounded-md text-amber-100">
+                  ⚠️ SKT YAKLAŞAN ({batchesNeedDiscount.length} Ürün)
+                </span>
+              </div>
+              <h3 className="text-sm font-black text-white mt-1 leading-tight">
+                Bu ürünlere indirim girişi yap!
+              </h3>
+              <p className="text-[11px] text-amber-100 mt-1 leading-relaxed">
+                Son kullanma tarihine 7 gün ve daha az kalan ürünleri reyondan kontrol edip sarı etiket indirimi (%25 / %50) uygulayın.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-3 pt-2.5 border-t border-white/20 flex items-center justify-between">
+          <button
+            type="button"
+            onClick={() => setActiveTab('need_discount')}
+            className="text-xs font-bold text-white bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-xl transition-all"
+          >
+            İndirim Bekleyenleri Listele ({batchesNeedDiscount.length})
+          </button>
+          <span className="text-[11px] text-amber-100 font-semibold">Sarı Etiket İndirimi</span>
+        </div>
+      </div>
+
+      {/* B. TARİHİ GEÇMİŞ ÜRÜNLER (TOPLA VE İMHA GİRİŞİ YAP) */}
+      <div className="bg-gradient-to-r from-red-600 to-rose-700 rounded-3xl p-4 text-white shadow-lg shadow-red-950/20">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <div className="w-9 h-9 rounded-2xl bg-white/20 flex items-center justify-center shrink-0 mt-0.5">
+              <Trash className="w-5 h-5 text-red-100" />
+            </div>
+            <div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-black uppercase tracking-wider bg-black/20 px-2 py-0.5 rounded-md text-red-100">
+                  🚨 TARİHİ GEÇEN ({batchesNeedDisposal.length} Ürün)
+                </span>
+              </div>
+              <h3 className="text-sm font-black text-white mt-1 leading-tight">
+                Topla, imha girişi yap!
+              </h3>
+              <p className="text-[11px] text-red-100 mt-1 leading-relaxed">
+                Tarihi geçmiş ürünlerin satışı yasaktır. Reyonlardan derhal toplayıp sistemden imha/fire çıkışını tamamlayın.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-3 pt-2.5 border-t border-white/20 flex items-center justify-between">
+          <button
+            type="button"
+            onClick={() => setActiveTab('need_disposal')}
+            className="text-xs font-bold text-white bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-xl transition-all"
+          >
+            İmha Edilecekleri Listele ({batchesNeedDisposal.length})
+          </button>
+          <span className="text-[11px] text-red-100 font-semibold">Fire / İmha Kaydı</span>
+        </div>
+      </div>
+
+      {/* Top Action Buttons: Yeni Parti & Ürün Tanımla */}
       <div className="flex items-center gap-2">
         <button
           onClick={handleOpenAddBatch}
-          className="flex-1 py-3 px-4 rounded-2xl bg-[#002B70] text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-md shadow-blue-900/15 active:scale-95 transition-transform"
+          className="flex-1 py-3 px-4 rounded-2xl bg-[#002B70] hover:bg-[#001D4D] text-[#FFE000] font-black text-xs flex items-center justify-center gap-1.5 shadow-md shadow-blue-900/15 active:scale-95 transition-transform"
         >
           <Plus className="w-4 h-4" />
           <span>Yeni Parti Ekle</span>
@@ -225,43 +374,48 @@ export const SKTView: React.FC<SKTViewProps> = ({
       </div>
 
       {/* Segmented Filter Bar */}
-      <div className="flex items-center gap-1 overflow-x-auto pb-1 text-[11px] font-semibold text-slate-600 no-scrollbar">
+      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-[11px] font-bold text-slate-600 no-scrollbar">
         <button
           onClick={() => setActiveTab('all')}
-          className={`px-3 py-1.5 rounded-xl whitespace-nowrap transition-all ${
-            activeTab === 'all' ? 'bg-[#002B70] text-white shadow-xs' : 'bg-white border border-slate-200'
+          className={`px-3 py-2 rounded-xl whitespace-nowrap transition-all ${
+            activeTab === 'all'
+              ? 'bg-[#002B70] text-white shadow-xs'
+              : 'bg-white border border-slate-200 hover:bg-slate-50'
           }`}
         >
-          Tüm Partiler ({batches.length})
+          Tüm Reyon ({batches.filter((b) => b.status !== 'disposed').length})
         </button>
+
         <button
-          onClick={() => setActiveTab('critical')}
-          className={`px-3 py-1.5 rounded-xl whitespace-nowrap transition-all ${
-            activeTab === 'critical' ? 'bg-red-600 text-white shadow-xs' : 'bg-white border border-slate-200 text-red-600'
+          onClick={() => setActiveTab('need_discount')}
+          className={`px-3 py-2 rounded-xl whitespace-nowrap transition-all flex items-center gap-1 ${
+            activeTab === 'need_discount'
+              ? 'bg-amber-500 text-white shadow-xs'
+              : 'bg-amber-50 border border-amber-200 text-amber-800 hover:bg-amber-100'
           }`}
         >
-          Kritik (≤3 Gün)
+          <Tag className="w-3.5 h-3.5" />
+          <span>İndirim Girişi ({batchesNeedDiscount.length})</span>
         </button>
+
         <button
-          onClick={() => setActiveTab('warning')}
-          className={`px-3 py-1.5 rounded-xl whitespace-nowrap transition-all ${
-            activeTab === 'warning' ? 'bg-amber-500 text-white shadow-xs' : 'bg-white border border-slate-200 text-amber-600'
+          onClick={() => setActiveTab('need_disposal')}
+          className={`px-3 py-2 rounded-xl whitespace-nowrap transition-all flex items-center gap-1 ${
+            activeTab === 'need_disposal'
+              ? 'bg-red-600 text-white shadow-xs'
+              : 'bg-red-50 border border-red-200 text-red-800 hover:bg-red-100'
           }`}
         >
-          Yaklaşan (≤7 Gün)
+          <Trash className="w-3.5 h-3.5" />
+          <span>Topla & İmha ({batchesNeedDisposal.length})</span>
         </button>
-        <button
-          onClick={() => setActiveTab('expired')}
-          className={`px-3 py-1.5 rounded-xl whitespace-nowrap transition-all ${
-            activeTab === 'expired' ? 'bg-slate-800 text-white shadow-xs' : 'bg-white border border-slate-200'
-          }`}
-        >
-          Tarihi Geçen
-        </button>
+
         <button
           onClick={() => setActiveTab('products')}
-          className={`px-3 py-1.5 rounded-xl whitespace-nowrap transition-all ${
-            activeTab === 'products' ? 'bg-[#FFE000] text-[#002B70] shadow-xs' : 'bg-white border border-slate-200'
+          className={`px-3 py-2 rounded-xl whitespace-nowrap transition-all ${
+            activeTab === 'products'
+              ? 'bg-[#FFE000] text-[#002B70] shadow-xs'
+              : 'bg-white border border-slate-200'
           }`}
         >
           Kayıtlı Ürünler ({products.length})
@@ -270,7 +424,7 @@ export const SKTView: React.FC<SKTViewProps> = ({
 
       {/* Batches View */}
       {activeTab !== 'products' ? (
-        <div className="space-y-2.5">
+        <div className="space-y-3">
           {filteredBatches.length === 0 ? (
             <div className="bg-white rounded-2xl p-8 border border-slate-200 text-center text-slate-400 text-xs">
               Bu kriterde ürün partisi bulunmuyor.
@@ -278,15 +432,24 @@ export const SKTView: React.FC<SKTViewProps> = ({
           ) : (
             filteredBatches.map((batch) => {
               const { category, daysRemaining, label } = getExpirationCategory(batch.expiration_date);
+              const isExpired = category === 'expired';
+              const isNeedDiscount = category === 'critical' || category === 'warning';
+              const hasDiscountNote = batch.notes && batch.notes.includes('İNDİRİM');
 
               return (
                 <div
                   key={batch.id}
-                  className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs space-y-2 hover:border-blue-300 transition-colors"
+                  className={`bg-white rounded-2xl p-4 border shadow-xs space-y-3 transition-colors ${
+                    isExpired
+                      ? 'border-red-300 ring-1 ring-red-200'
+                      : isNeedDiscount
+                      ? 'border-amber-300 ring-1 ring-amber-200'
+                      : 'border-slate-200/80'
+                  }`}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="font-extrabold text-sm text-slate-900 truncate">
                           {batch.product?.name || 'Bilinmeyen Ürün'}
                         </span>
@@ -304,8 +467,8 @@ export const SKTView: React.FC<SKTViewProps> = ({
 
                     {/* Expiration badge */}
                     <div
-                      className={`px-2.5 py-1 rounded-xl text-xs font-bold shrink-0 flex items-center gap-1 ${
-                        category === 'expired'
+                      className={`px-2.5 py-1 rounded-xl text-xs font-black shrink-0 flex items-center gap-1 ${
+                        isExpired
                           ? 'bg-red-100 text-red-700'
                           : category === 'critical'
                           ? 'bg-red-50 text-red-600 animate-pulse'
@@ -314,7 +477,7 @@ export const SKTView: React.FC<SKTViewProps> = ({
                           : 'bg-emerald-50 text-emerald-700'
                       }`}
                     >
-                      {category === 'expired' || category === 'critical' ? (
+                      {isExpired ? (
                         <AlertTriangle className="w-3.5 h-3.5" />
                       ) : (
                         <CalendarClock className="w-3.5 h-3.5" />
@@ -323,37 +486,77 @@ export const SKTView: React.FC<SKTViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Notes if any */}
+                  {/* Notes / Tag info if any */}
                   {batch.notes && (
-                    <p className="text-[11px] text-slate-600 bg-slate-50 px-2.5 py-1.5 rounded-lg border border-slate-100">
+                    <p className="text-[11px] text-slate-700 bg-slate-50 px-2.5 py-1.5 rounded-xl border border-slate-100 font-medium">
                       {batch.notes}
                     </p>
                   )}
 
-                  {/* Footer actions */}
+                  {/* ========================================================= */}
+                  {/* ÖZEL AKSİYON BUTONLARI (İNDİRİM GİRİŞİ VEYA TOPLA-İMHA ET) */}
+                  {/* ========================================================= */}
+                  {isExpired && batch.status !== 'disposed' && (
+                    <div className="bg-red-50 p-2.5 rounded-xl border border-red-200 flex items-center justify-between gap-2">
+                      <div className="text-[11px] text-red-800 font-bold flex items-center gap-1">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-red-600" />
+                        <span>Tarihi geçmiş! Raftan topla:</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleQuickDispose(batch)}
+                        className="bg-red-600 hover:bg-red-700 active:scale-95 text-white font-extrabold text-xs px-3 py-1.5 rounded-xl shadow-xs transition-transform flex items-center gap-1 shrink-0"
+                      >
+                        <Trash className="w-3.5 h-3.5" />
+                        <span>Topla & İmha Et</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {isNeedDiscount && batch.status !== 'disposed' && (
+                    <div className="bg-amber-50 p-2.5 rounded-xl border border-amber-200 flex items-center justify-between gap-2">
+                      <div className="text-[11px] text-amber-900 font-bold flex items-center gap-1">
+                        <Tag className="w-3.5 h-3.5 shrink-0 text-amber-600" />
+                        <span>{hasDiscountNote ? 'İndirim uygulandı' : 'SKT yaklaştı!'}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDiscountModalBatch(batch);
+                          setDiscountRate(25);
+                        }}
+                        className="bg-amber-500 hover:bg-amber-600 active:scale-95 text-white font-extrabold text-xs px-3 py-1.5 rounded-xl shadow-xs transition-transform flex items-center gap-1 shrink-0"
+                      >
+                        <Tag className="w-3.5 h-3.5" />
+                        <span>İndirim Girişi Yap</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Footer metadata & standard actions */}
                   <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
                     <span className="text-[11px] text-slate-400">
                       SKT: <strong className="text-slate-700">{formatTurkishDate(batch.expiration_date)}</strong>
                     </span>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5">
                       <button
                         onClick={() => handleViewHistory(batch)}
-                        className="text-slate-400 hover:text-slate-700 p-1 rounded"
+                        className="text-slate-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-slate-100"
                         title="Durum Geçmişi"
                       >
                         <History className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={() => handleOpenEditBatch(batch)}
-                        className="text-blue-600 hover:text-blue-800 p-1 rounded"
+                        className="text-blue-600 hover:text-blue-800 p-1.5 rounded-lg hover:bg-blue-50"
                         title="Düzenle"
                       >
                         <Edit2 className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={() => handleDeleteBatch(batch.id)}
-                        className="text-red-500 hover:text-red-700 p-1 rounded"
+                        className="text-red-500 hover:text-red-700 p-1.5 rounded-lg hover:bg-red-50"
                         title="Sil"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -391,15 +594,17 @@ export const SKTView: React.FC<SKTViewProps> = ({
                     setProductDesc(prod.description || '');
                     setProductModalOpen(true);
                   }}
-                  className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg"
+                  className="p-1.5 rounded-lg text-blue-600 hover:bg-blue-50"
+                  title="Ürünü Düzenle"
                 >
-                  <Edit2 className="w-4 h-4" />
+                  <Edit2 className="w-3.5 h-3.5" />
                 </button>
                 <button
                   onClick={() => handleDeleteProduct(prod.id, prod.name)}
-                  className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg"
+                  className="p-1.5 rounded-lg text-red-600 hover:bg-red-50"
+                  title="Ürünü Sil"
                 >
-                  <Trash2 className="w-4 h-4" />
+                  <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </div>
             </div>
@@ -407,32 +612,103 @@ export const SKTView: React.FC<SKTViewProps> = ({
         </div>
       )}
 
-      {/* MODAL: Yeni / Düzenle Parti */}
-      {batchModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <div className="w-full max-w-sm rounded-3xl bg-white p-5 shadow-2xl border border-slate-100 text-slate-900">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <h3 className="text-sm font-bold text-[#002B70]">
-                {editingBatch ? 'Partiyi Düzenle' : 'Yeni SKT Partisi Ekle'}
-              </h3>
+      {/* QUICK DISCOUNT MODAL */}
+      {discountModalBatch && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center font-bold">
+                  <Tag className="w-4 h-4" />
+                </div>
+                <h3 className="text-sm font-bold text-slate-900">İndirim Girişi Yap</h3>
+              </div>
               <button
-                onClick={() => setBatchModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1"
+                type="button"
+                onClick={() => setDiscountModalBatch(null)}
+                className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-slate-500"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveBatch} className="space-y-3 mt-3">
+            <p className="text-xs text-slate-600">
+              <strong className="text-slate-900">{discountModalBatch.product?.name}</strong> için sarı etiket indirim oranını seçin:
+            </p>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setDiscountRate(25)}
+                className={`py-3 px-4 rounded-2xl border text-center transition-all ${
+                  discountRate === 25
+                    ? 'bg-amber-500 text-white font-black border-amber-600 shadow-md ring-2 ring-amber-200'
+                    : 'bg-white text-slate-700 border-slate-200 font-bold hover:bg-slate-50'
+                }`}
+              >
+                <span className="text-lg block">%25</span>
+                <span className="text-[10px]">Sarı Etiket</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setDiscountRate(50)}
+                className={`py-3 px-4 rounded-2xl border text-center transition-all ${
+                  discountRate === 50
+                    ? 'bg-amber-600 text-white font-black border-amber-700 shadow-md ring-2 ring-amber-200'
+                    : 'bg-white text-slate-700 border-slate-200 font-bold hover:bg-slate-50'
+                }`}
+              >
+                <span className="text-lg block">%50</span>
+                <span className="text-[10px]">Sarı Etiket</span>
+              </button>
+            </div>
+
+            <div className="pt-2 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setDiscountModalBatch(null)}
+                className="w-1/3 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-bold text-xs"
+              >
+                Vazgeç
+              </button>
+              <button
+                type="button"
+                onClick={handleApplyDiscountSubmit}
+                className="w-2/3 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-black text-xs shadow-md"
+              >
+                İndirimi Uygula ve Kaydet
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* BATCH MODAL (Yeni / Düzenle) */}
+      {batchModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900">
+                {editingBatch ? 'Parti Düzenle' : 'Yeni SKT Partisi Ekle'}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setBatchModalOpen(false)}
+                className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-slate-500"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveBatch} className="space-y-3">
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Ürün Seçiniz
-                </label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Ürün</label>
                 <select
                   value={batchProductId}
                   onChange={(e) => setBatchProductId(e.target.value)}
                   required
-                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 font-semibold"
+                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 bg-white focus:outline-none"
                 >
                   {products.map((p) => (
                     <option key={p.id} value={p.id}>
@@ -444,28 +720,24 @@ export const SKTView: React.FC<SKTViewProps> = ({
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Parti No / Kodu
-                  </label>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Parti No</label>
                   <input
                     type="text"
                     value={batchNumber}
                     onChange={(e) => setBatchNumber(e.target.value)}
-                    placeholder="PRT-01"
+                    placeholder="PRT-101"
                     className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Miktar (Adet)
-                  </label>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Adet</label>
                   <input
                     type="number"
                     min="1"
                     value={batchQuantity}
                     onChange={(e) => setBatchQuantity(e.target.value)}
                     required
-                    className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 tabular-nums font-bold"
+                    className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200"
                   />
                 </div>
               </div>
@@ -479,54 +751,32 @@ export const SKTView: React.FC<SKTViewProps> = ({
                   value={batchExpDate}
                   onChange={(e) => setBatchExpDate(e.target.value)}
                   required
-                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 font-semibold"
+                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200"
                 />
-                <p className="text-[10px] text-slate-400 mt-0.5">
-                  * SKT tarihinin gelecekte olması normaldir.
-                </p>
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Parti Durumu
-                </label>
-                <select
-                  value={batchStatus}
-                  onChange={(e) => setBatchStatus(e.target.value as BatchStatus)}
-                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 font-semibold"
-                >
-                  <option value="active">Reyonda / Aktif</option>
-                  <option value="warning">Yaklaşan / İndirim Etiketi</option>
-                  <option value="expired">Tarihi Geçti (İmha / İade)</option>
-                  <option value="consumed">Satıldı / Tükendi</option>
-                  <option value="disposed">İmha Edildi</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Not / Açıklama
-                </label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Not / Konum</label>
                 <input
                   type="text"
                   value={batchNotes}
                   onChange={(e) => setBatchNotes(e.target.value)}
-                  placeholder="Örn: Sarı etiket yapıştırıldı"
+                  placeholder="Örn: Süt reyonu ön sıra"
                   className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200"
                 />
               </div>
 
-              <div className="flex items-center gap-2 pt-2">
+              <div className="pt-2 flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setBatchModalOpen(false)}
-                  className="w-1/2 py-2.5 rounded-xl border border-slate-200 text-xs font-medium"
+                  className="w-1/3 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-bold text-xs"
                 >
                   Vazgeç
                 </button>
                 <button
                   type="submit"
-                  className="w-1/2 py-2.5 rounded-xl bg-[#002B70] text-white text-xs font-bold"
+                  className="w-2/3 py-2.5 rounded-xl bg-[#002B70] text-white font-bold text-xs shadow-md"
                 >
                   Kaydet
                 </button>
@@ -536,74 +786,70 @@ export const SKTView: React.FC<SKTViewProps> = ({
         </div>
       )}
 
-      {/* MODAL: Ürün Tanımla */}
+      {/* PRODUCT MODAL */}
       {productModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <div className="w-full max-w-sm rounded-3xl bg-white p-5 shadow-2xl border border-slate-100 text-slate-900">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <h3 className="text-sm font-bold text-[#002B70]">
-                {editingProduct ? 'Ürünü Düzenle' : 'Yeni Ürün Tanımla'}
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900">
+                {editingProduct ? 'Ürün Düzenle' : 'Yeni Ürün Tanımla'}
               </h3>
               <button
+                type="button"
                 onClick={() => setProductModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1"
+                className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-slate-500"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveProduct} className="space-y-3 mt-3">
+            <form onSubmit={handleSaveProduct} className="space-y-3">
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Ürün Adı
-                </label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Ürün Adı</label>
                 <input
                   type="text"
                   value={productName}
                   onChange={(e) => setProductName(e.target.value)}
-                  placeholder="Örn: Mis Süt 1L"
+                  placeholder="Örn: Mis Tam Yağlı Süt 1L"
                   required
-                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 font-semibold"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Barkod (İsteğe Bağlı)
-                </label>
-                <input
-                  type="text"
-                  value={productBarcode}
-                  onChange={(e) => setProductBarcode(e.target.value)}
-                  placeholder="8690504..."
                   className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200"
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Kategori (İsteğe Bağlı)
-                </label>
-                <input
-                  type="text"
-                  value={productCategory}
-                  onChange={(e) => setProductCategory(e.target.value)}
-                  placeholder="Örn: Süt & Kahvaltılık, Temel Gıda..."
-                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200"
-                />
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Barkod</label>
+                  <input
+                    type="text"
+                    value={productBarcode}
+                    onChange={(e) => setProductBarcode(e.target.value)}
+                    placeholder="8690..."
+                    className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Kategori</label>
+                  <input
+                    type="text"
+                    value={productCategory}
+                    onChange={(e) => setProductCategory(e.target.value)}
+                    placeholder="Süt & Kahvaltılık"
+                    className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200"
+                  />
+                </div>
               </div>
 
-              <div className="flex items-center gap-2 pt-2">
+              <div className="pt-2 flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setProductModalOpen(false)}
-                  className="w-1/2 py-2.5 rounded-xl border border-slate-200 text-xs font-medium"
+                  className="w-1/3 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-bold text-xs"
                 >
                   Vazgeç
                 </button>
                 <button
                   type="submit"
-                  className="w-1/2 py-2.5 rounded-xl bg-[#002B70] text-white text-xs font-bold"
+                  className="w-2/3 py-2.5 rounded-xl bg-[#002B70] text-white font-bold text-xs shadow-md"
                 >
                   Kaydet
                 </button>
@@ -613,35 +859,36 @@ export const SKTView: React.FC<SKTViewProps> = ({
         </div>
       )}
 
-      {/* MODAL: Durum Değişiklik Geçmişi */}
+      {/* HISTORY MODAL */}
       {historyModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <div className="w-full max-w-sm rounded-3xl bg-white p-5 shadow-2xl border border-slate-100 text-slate-900 max-h-[80vh] overflow-y-auto">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <h3 className="text-sm font-bold text-[#002B70]">
-                Durum Geçmişi - {selectedBatchTitle}
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900">
+                {selectedBatchTitle} - Durum Geçmişi
               </h3>
               <button
+                type="button"
                 onClick={() => setHistoryModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1"
+                className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-slate-500"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="mt-3 space-y-2">
+            <div className="space-y-2 max-h-60 overflow-y-auto">
               {selectedBatchHistory.length === 0 ? (
-                <p className="text-xs text-slate-400 text-center py-4">
-                  Kayıtlı durum değişikliği bulunmuyor.
-                </p>
+                <p className="text-xs text-slate-400 text-center py-4">Kayıtlı geçmiş bulunamadı.</p>
               ) : (
                 selectedBatchHistory.map((h) => (
                   <div key={h.id} className="p-2.5 bg-slate-50 rounded-xl text-xs space-y-1">
                     <div className="flex justify-between font-bold text-slate-700">
-                      <span>{h.previous_status} ➔ {h.new_status}</span>
-                      <span className="text-[10px] text-slate-400">{h.created_at?.slice(0, 16)}</span>
+                      <span>{h.old_status} ➔ {h.new_status}</span>
+                      <span className="text-[10px] text-slate-400 font-normal">
+                        {h.changed_at?.slice(0, 10)}
+                      </span>
                     </div>
-                    {h.notes && <p className="text-slate-500 text-[11px]">{h.notes}</p>}
+                    {h.notes && <p className="text-[10px] text-slate-500">{h.notes}</p>}
                   </div>
                 ))
               )}

@@ -61,6 +61,16 @@ export interface CashTransaction {
   updated_at?: string;
 }
 
+export interface DenominationCounts {
+  d200: number; // 200 TL adet
+  d100: number; // 100 TL adet
+  d50: number;  // 50 TL adet
+  d20: number;  // 20 TL adet
+  d10: number;  // 10 TL adet
+  d5: number;   // 5 TL adet
+  d1: number;   // 1 TL adet
+}
+
 export interface CashCount {
   id: string;
   shift_id: string;
@@ -74,7 +84,7 @@ export interface CashCount {
   expected_cash?: number;
   difference?: number;
   status?: 'exact' | 'surplus' | 'deficit' | 'indeterminate';
-  count_breakdown?: Record<string, number>;
+  count_breakdown?: Record<string, number> | DenominationCounts;
 }
 
 export interface Product {

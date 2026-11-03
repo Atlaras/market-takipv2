@@ -1,7 +1,7 @@
 import React from 'react';
 import { Home, QrCode, Calculator, CalendarClock, BarChart3, LucideIcon } from 'lucide-react';
 
-export type NavTab = 'home' | 'qr' | 'cash' | 'skt' | 'reports';
+export type NavTab = 'cash' | 'qr' | 'skt' | 'reports';
 
 interface TabItem {
   id: NavTab;
@@ -22,9 +22,8 @@ export const BottomNav: React.FC<BottomNavProps> = ({
   sktAlertCount = 0,
 }) => {
   const tabs: TabItem[] = [
-    { id: 'home', label: 'Ana Sayfa', icon: Home },
-    { id: 'qr', label: 'QR Takibi', icon: QrCode },
     { id: 'cash', label: 'Kasa', icon: Calculator },
+    { id: 'qr', label: 'QR Takibi', icon: QrCode },
     { id: 'skt', label: 'SKT', icon: CalendarClock, badge: sktAlertCount },
     { id: 'reports', label: 'Raporlar', icon: BarChart3 },
   ];
@@ -34,7 +33,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
       aria-label="Alt Navigasyon Menüsü"
       className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/80 shadow-[0_-4px_20px_rgba(0,0,0,0.04)] pb-safe"
     >
-      <div className="max-w-md mx-auto grid grid-cols-5 h-16 items-center px-1">
+      <div className="max-w-md mx-auto grid grid-cols-4 h-16 items-center px-2">
         {tabs.map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;

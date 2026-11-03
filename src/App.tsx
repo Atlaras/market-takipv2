@@ -22,7 +22,6 @@ import { LoginView } from './views/LoginView';
 import { Header } from './components/Header';
 import { BottomNav, NavTab } from './components/BottomNav';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
-import { HomeView } from './views/HomeView';
 import { QRView } from './views/QRView';
 import { CashView } from './views/CashView';
 import { SKTView } from './views/SKTView';
@@ -46,7 +45,7 @@ export default function App() {
     }
     return null;
   });
-  const [activeTab, setActiveTab] = useState<NavTab>('home');
+  const [activeTab, setActiveTab] = useState<NavTab>('cash');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isAuthLoading, setIsAuthLoading] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -172,7 +171,7 @@ export default function App() {
         getActiveShift(user.id).catch((err) => {
           if (isAutostart) {
             return {
-              id: 'shift-demo-1',
+              id: 'a0000000-0000-0000-0000-000000000001',
               owner_id: user.id,
               shift_date: new Date().toISOString().slice(0, 10),
               opening_cash: 0,
@@ -203,7 +202,7 @@ export default function App() {
           if (isAutostart) {
             return [
               {
-                id: 'tx-demo-1',
+                id: 'b0000000-0000-0000-0000-000000000001',
                 shift_id: actShift.id,
                 owner_id: user.id,
                 transaction_type: 'cash_sale',
@@ -215,7 +214,7 @@ export default function App() {
                 created_at: new Date().toISOString(),
               },
               {
-                id: 'tx-demo-2',
+                id: 'b0000000-0000-0000-0000-000000000002',
                 shift_id: actShift.id,
                 owner_id: user.id,
                 transaction_type: 'card_sale',
@@ -257,7 +256,7 @@ export default function App() {
 
   const handleLoginSuccess = (loggedInUser: UserProfile) => {
     setUser(loggedInUser);
-    setActiveTab('home');
+    setActiveTab('cash');
   };
 
   const handleLogout = async () => {
@@ -298,7 +297,6 @@ export default function App() {
       {/* Top Header */}
       <Header
         activeTab={activeTab}
-        onBack={() => setActiveTab('home')}
         onOpenSettings={() => setIsSettingsOpen(true)}
         sktAlertCount={sktAlertCount}
         onOpenAlerts={() => setActiveTab('skt')}
@@ -323,17 +321,15 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Content Area */}
+      {/* Main Content Area (4 Ana Sekme: Kasa, QR, SKT, Raporlar) */}
       <main className="flex-1 max-w-md mx-auto w-full pt-3">
-        {activeTab === 'home' && (
-          <HomeView
+        {activeTab === 'cash' && (
+          <CashView
             user={user}
-            onNavigate={(tab) => setActiveTab(tab)}
-            qrTransactions={qrTransactions}
             activeShift={activeShift}
-            cashTransactions={shiftTransactions}
-            batches={batches}
-            onStartShiftClick={() => setActiveTab('cash')}
+            shiftTransactions={shiftTransactions}
+            pastShifts={pastShifts}
+            onShiftUpdated={loadData}
           />
         )}
 
@@ -343,16 +339,6 @@ export default function App() {
             transactions={qrTransactions}
             onTransactionsUpdated={loadData}
             appSettings={appSettings}
-          />
-        )}
-
-        {activeTab === 'cash' && (
-          <CashView
-            user={user}
-            activeShift={activeShift}
-            shiftTransactions={shiftTransactions}
-            pastShifts={pastShifts}
-            onShiftUpdated={loadData}
           />
         )}
 
